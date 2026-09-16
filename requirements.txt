@@ -2,3 +2,4 @@ edge-tts
 flask
 flask-cors
 gunicorn
+requests
