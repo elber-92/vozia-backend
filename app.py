@@ -1,15 +1,35 @@
 import asyncio
 import io
 import os
-
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+import requests
 import edge_tts
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
-
 _voices_cache = None
+
+FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
+FFPROBE = os.environ.get("FFPROBE_BIN", "ffprobe")
+FONTE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+TAGS = {
+    "tecnologia": "technology", "software": "technology", "digital": "technology", "app": "technology",
+    "natureza": "nature", "ambiente": "nature", "animais": "nature", "planta": "nature",
+    "saude": "health", "medico": "health", "hospital": "health", "medicina": "health",
+    "dinheiro": "finance", "financa": "finance", "economia": "finance", "investimento": "finance",
+    "escola": "education", "estudo": "education", "educacao": "education", "professor": "education",
+    "viagem": "travel", "viajar": "travel", "cidade": "travel",
+    "comida": "food", "alimentacao": "food", "receita": "food", "restaurante": "food",
+    "negocio": "business", "empresa": "business", "empreendedor": "business", "trabalho": "business",
+    "esporte": "sport", "futebol": "sport", "exercicio": "sport",
+    "musica": "music", "arte": "music", "cultura": "music",
+}
 
 @app.get("/api/voices")
 def list_voices():
@@ -34,10 +54,8 @@ def list_voices():
 def synthesize():
     data = request.get_json(force=True, silent=True) or {}
     text = (data.get("text") or "").strip()
-
     if not text:
         return jsonify({"error": "Texto vazio."}), 400
-
     voice = data.get("voice") or "pt-BR-FranciscaNeural"
     rate = data.get("rate") or "+0%"
     pitch = data.get("pitch") or "+0Hz"
@@ -55,33 +73,9 @@ def synthesize():
         audio = asyncio.run(run())
     except Exception as exc:
         return jsonify({"error": f"Falha na sintese: {exc}"}), 502
-
     if not audio:
         return jsonify({"error": "O motor nao retornou audio. Verifique a voz."}), 502
-
     return Response(audio, mimetype="audio/mpeg")
-
-import asyncio, os, re, subprocess, tempfile
-from pathlib import Path
-import requests
-from flask import jsonify, request, send_file
-
-FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
-FFPROBE = os.environ.get("FFPROBE_BIN", "ffprobe")
-FONTE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-TAGS = {
-    "tecnologia": "technology", "software": "technology", "digital": "technology", "app": "technology",
-    "natureza": "nature", "ambiente": "nature", "animais": "nature", "planta": "nature",
-    "saude": "health", "medico": "health", "hospital": "health", "medicina": "health",
-    "dinheiro": "finance", "financa": "finance", "economia": "finance", "investimento": "finance",
-    "escola": "education", "estudo": "education", "educacao": "education", "professor": "education",
-    "viagem": "travel", "viajar": "travel", "cidade": "travel",
-    "comida": "food", "alimentacao": "food", "receita": "food", "restaurante": "food",
-    "negocio": "business", "empresa": "business", "empreendedor": "business", "trabalho": "business",
-    "esporte": "sport", "futebol": "sport", "exercicio": "sport",
-    "musica": "music", "arte": "music", "cultura": "music",
-}
 
 def detectar_tag(texto):
     t = texto.lower()
@@ -95,11 +89,13 @@ def dividir_em_cenas(texto):
     cenas, atual = [], ""
     for f in frases:
         if len(atual) + len(f) + 1 > 180:
-            if atual: cenas.append(atual.strip())
+            if atual:
+                cenas.append(atual.strip())
             atual = f
         else:
             atual = (atual + " " + f).strip()
-    if atual: cenas.append(atual.strip())
+    if atual:
+        cenas.append(atual.strip())
     return cenas
 
 def baixar_url(url, destino, timeout=8):
@@ -136,7 +132,6 @@ def baixar_imagem(cena, pasta, idx, modo):
     return "gradiente"
 
 async def gerar_audio(texto, voz, rate, pitch, volume, destino):
-    import edge_tts
     comunicador = edge_tts.Communicate(texto, voz, rate=rate, pitch=pitch, volume=volume)
     await comunicador.save(str(destino))
 
@@ -150,7 +145,7 @@ def duracao_audio(arquivo):
         return 10.0
 
 def escapar_drawtext(t):
-    t = t.replace("\", " ").replace(":", " ").replace("'", " ").replace("%", " ").replace("\n", " ").replace(",", " ")
+    t = t.replace(chr(92), " ").replace(":", " ").replace("'", " ").replace("%", " ").replace(chr(10), " ").replace(",", " ")
     return t.strip()[:80]
 
 def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
@@ -205,7 +200,7 @@ def api_video():
                             frames_por_cena[i], pasta, f"clip_{i:03d}.mp4")
 
         lista = pasta / "lista.txt"
-        lista.write_text("".join(f"file 'clip_{i:03d}.mp4'\n" for i in range(len(cenas))))
+        lista.write_text("".join("file 'clip_" + str(i).zfill(3) + ".mp4'" + chr(10) for i in range(len(cenas))))
         concat = pasta / "concat.mp4"
         subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(lista),
                         "-c", "copy", str(concat)], capture_output=True)
@@ -217,6 +212,9 @@ def api_video():
 
         if final.stat().st_size == 0:
             return jsonify({"erro": "Falha ao montar o vídeo"}), 500
+
+        return send_file(final, mimetype="video/mp4", as_attachment=True,
+                         download_name="vozia_video.mp4")
 
         return send_file(final, mimetype="video/mp4", as_attachment=True,
                          download_name="vozia_video.mp4")
