@@ -150,8 +150,8 @@ def duracao_audio(arquivo):
         return 10.0
 
 def escapar_drawtext(t):
-    t = t.replace("\", " ").replace(":", " ").replace("'", " ").replace("%", " ").replace("\n", " ").replace(",", " ")
-    return t.strip()[:80]
+    return (t.replace("\", "\\").replace(":", "\:").replace("'", "\'")
+            .replace("%", "\%").replace("\n", " "))[:80]
 
 def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
     texto = escapar_drawtext(legenda)
