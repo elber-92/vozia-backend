@@ -4,7 +4,9 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import urllib.parse
+import uuid
 from pathlib import Path
 
 import edge_tts
@@ -19,6 +21,11 @@ CORS(app)
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE = os.environ.get("FFPROBE_BIN", "ffprobe")
 FONTE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# ---------------- Fila de vídeos (processamento em segundo plano) ----------------
+JOBS_DIR = Path("/tmp/vozia_jobs")
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+JOBS = {}
 
 # ---------------- Lista de vozes ----------------
 _voices_cache = None
@@ -190,6 +197,73 @@ def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
         capture_output=True,
     )
 
+def gerar_video_job(job_id, dados):
+    final = JOBS_DIR / f"{job_id}.mp4"
+    try:
+        texto = (dados.get("text") or "").strip()
+        if not texto:
+            raise ValueError("Texto vazio")
+
+        voz = dados.get("voice", "pt-BR-FranciscaNeural")
+        rate = dados.get("rate", "+0%")
+        pitch = dados.get("pitch", "+0Hz")
+        volume = dados.get("volume", "+0%")
+        modo = dados.get("mode", "rapido")
+        estilo = dados.get("style", "cinematic")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pasta = Path(tmp)
+
+            cenas = dividir_em_cenas(texto)
+            if len(cenas) > 40:
+                raise ValueError("Muitas cenas (máximo 40). Divida o texto em partes.")
+
+            for i, cena in enumerate(cenas, 1):
+                baixar_imagem(cena, pasta, i, modo, estilo)
+
+            audio = pasta / "narracao.mp3"
+            asyncio.run(gerar_audio(texto, voz, rate, pitch, volume, audio))
+
+            dur = duracao_audio(audio)
+            totais = [max(len(c), 1) for c in cenas]
+            soma = sum(totais)
+            frames_por_cena = [max(30, int(dur * 30 * (t / soma))) for t in totais]
+
+            for i, cena in enumerate(cenas):
+                renderizar_cena(
+                    pasta / f"cena_{i+1:03d}.jpg",
+                    cena,
+                    i + 1,
+                    len(cenas),
+                    frames_por_cena[i],
+                    pasta,
+                    f"clip_{i:03d}.mp4",
+                )
+
+            lista = pasta / "lista.txt"
+            lista.write_text("".join(f"file 'clip_{i:03d}.mp4'\n" for i in range(len(cenas))))
+
+            concat = pasta / "concat.mp4"
+            subprocess.run(
+                [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(lista),
+                 "-c", "copy", str(concat)],
+                capture_output=True,
+            )
+
+            subprocess.run(
+                [FFMPEG, "-y", "-i", str(concat), "-i", str(audio),
+                 "-c:v", "copy", "-c:a", "aac", "-shortest",
+                 "-movflags", "+faststart", str(final)],
+                capture_output=True,
+            )
+
+        if not final.exists() or final.stat().st_size == 0:
+            raise RuntimeError("Falha ao montar o vídeo")
+
+        JOBS[job_id] = {"status": "done", "file": str(final)}
+    except Exception as exc:
+        JOBS[job_id] = {"status": "error", "error": str(exc)}
+
 @app.route("/api/video", methods=["POST"])
 def api_video():
     dados = request.get_json(force=True, silent=True) or {}
@@ -197,67 +271,29 @@ def api_video():
     if not texto:
         return jsonify({"erro": "Texto vazio"}), 400
 
-    voz = dados.get("voice", "pt-BR-FranciscaNeural")
-    rate = dados.get("rate", "+0%")
-    pitch = dados.get("pitch", "+0Hz")
-    volume = dados.get("volume", "+0%")
-    modo = dados.get("mode", "rapido")
-    estilo = dados.get("style", "cinematic")
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {"status": "processing"}
+    threading.Thread(target=gerar_video_job, args=(job_id, dados), daemon=True).start()
+    return jsonify({"jobId": job_id}), 202
 
-    with tempfile.TemporaryDirectory() as tmp:
-        pasta = Path(tmp)
+@app.get("/api/video/status/<job_id>")
+def video_status(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"erro": "Trabalho não encontrado"}), 404
+    if job["status"] == "processing":
+        return jsonify({"status": "processing"})
+    if job["status"] == "done":
+        return jsonify({"status": "done", "downloadUrl": f"/api/video/download/{job_id}"})
+    return jsonify({"status": "error", "erro": job.get("error", "Erro desconhecido")}), 500
 
-        cenas = dividir_em_cenas(texto)
-        if len(cenas) > 40:
-            return jsonify({"erro": "Muitas cenas (máximo 40). Divida o texto em partes."}), 400
-
-        origens = []
-        for i, cena in enumerate(cenas, 1):
-            origem = baixar_imagem(cena, pasta, i, modo, estilo)
-            origens.append({"cena": cena[:60], "origem": origem})
-
-        audio = pasta / "narracao.mp3"
-        asyncio.run(gerar_audio(texto, voz, rate, pitch, volume, audio))
-
-        dur = duracao_audio(audio)
-        totais = [max(len(c), 1) for c in cenas]
-        soma = sum(totais)
-        frames_por_cena = [max(30, int(dur * 30 * (t / soma))) for t in totais]
-
-        for i, cena in enumerate(cenas):
-            renderizar_cena(
-                pasta / f"cena_{i+1:03d}.jpg",
-                cena,
-                i + 1,
-                len(cenas),
-                frames_por_cena[i],
-                pasta,
-                f"clip_{i:03d}.mp4",
-            )
-
-        lista = pasta / "lista.txt"
-        lista.write_text("".join(f"file 'clip_{i:03d}.mp4'\n" for i in range(len(cenas))))
-
-        concat = pasta / "concat.mp4"
-        subprocess.run(
-            [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(lista),
-             "-c", "copy", str(concat)],
-            capture_output=True,
-        )
-
-        final = pasta / "vozia_video.mp4"
-        subprocess.run(
-            [FFMPEG, "-y", "-i", str(concat), "-i", str(audio),
-             "-c:v", "copy", "-c:a", "aac", "-shortest",
-             "-movflags", "+faststart", str(final)],
-            capture_output=True,
-        )
-
-        if final.stat().st_size == 0:
-            return jsonify({"erro": "Falha ao montar o vídeo"}), 500
-
-        return send_file(final, mimetype="video/mp4", as_attachment=True,
-                         download_name="vozia_video.mp4")
+@app.get("/api/video/download/<job_id>")
+def video_download(job_id):
+    job = JOBS.get(job_id)
+    if not job or job["status"] != "done":
+        return jsonify({"erro": "Vídeo não disponível"}), 404
+    return send_file(job["file"], mimetype="video/mp4", as_attachment=True,
+                     download_name="vozia_video.mp4")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=False)
