@@ -30,6 +30,7 @@ JOBS = {}
 # ---------------- Lista de vozes ----------------
 _voices_cache = None
 
+
 @app.get("/api/voices")
 def list_voices():
     global _voices_cache
@@ -48,6 +49,7 @@ def list_voices():
             key=lambda v: (v["locale"], v["name"]),
         )
     return jsonify(_voices_cache)
+
 
 # ---------------- Áudio (TTS) ----------------
 @app.post("/api/tts")
@@ -80,6 +82,7 @@ def synthesize():
 
     return Response(audio, mimetype="audio/mpeg")
 
+
 # ---------------- Vídeo ----------------
 TAGS = {
     "tecnologia": "technology", "software": "technology", "digital": "technology", "app": "technology",
@@ -94,12 +97,14 @@ TAGS = {
     "musica": "music", "arte": "music", "cultura": "music",
 }
 
+
 def detectar_tag(texto):
     t = texto.lower()
     for palavra, tag in TAGS.items():
         if palavra in t:
             return tag
     return "abstract"
+
 
 def dividir_em_cenas(texto):
     frases = [f.strip() for f in re.split(r'(?<=[.!?…])\s+|\n+', texto) if f.strip()]
@@ -115,6 +120,7 @@ def dividir_em_cenas(texto):
         cenas.append(atual.strip())
     return cenas
 
+
 def baixar_url(url, destino, timeout=8):
     try:
         r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
@@ -125,6 +131,7 @@ def baixar_url(url, destino, timeout=8):
         pass
     return False
 
+
 def criar_gradiente(destino):
     subprocess.run(
         [FFMPEG, "-y", "-f", "lavfi",
@@ -132,6 +139,7 @@ def criar_gradiente(destino):
          "-frames:v", "1", str(destino)],
         capture_output=True,
     )
+
 
 ESTILOS_IMAGEM = {
     "cinematic": "cinematic film still, dramatic lighting, unified color palette, high detail",
@@ -141,17 +149,34 @@ ESTILOS_IMAGEM = {
     "fantasy": "epic fantasy art, magical atmosphere, rich colors, volumetric light, high detail",
 }
 
+
+def extrair_assunto(cena, tag):
+    """Extrai um assunto visual relevante da cena para o prompt de imagem."""
+    cena_limpa = cena.replace('"', "").replace("'", "").strip()
+    palavras = cena_limpa.split()
+    if len(palavras) <= 6:
+        return cena_limpa
+    nomes_proprios = [p for p in palavras if p[0].isupper() and len(p) > 2]
+    if nomes_proprios:
+        return " ".join(nomes_proprios[:3])
+    return " ".join(palavras[:8])
+
+
 def baixar_imagem(cena, pasta, idx, modo, estilo="cinematic"):
     tag = detectar_tag(cena)
     destino = pasta / f"cena_{idx:03d}.jpg"
     sufixo = ESTILOS_IMAGEM.get(estilo, ESTILOS_IMAGEM["cinematic"])
+    assunto = extrair_assunto(cena, tag)
     if modo in ("qualidade", "automatico"):
-        prompt = (cena[:120] + ", " + sufixo + ", no text, no watermark, 16:9 widescreen")
+        prompt = (
+            f"A cinematic scene of {assunto}, related to {tag}, "
+            f"{sufixo}, no text, no watermark, 16:9 widescreen"
+        )
         url = (
             "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) +
             "?width=1280&height=720&nologo=true&seed=" + str(1000 + idx) + "&model=flux"
         )
-        if baixar_url(url, destino, timeout=6):
+        if baixar_url(url, destino, timeout=8):
             return "ia"
     if baixar_url(f"https://loremflickr.com/1280/720/{tag}", destino, timeout=4):
         return "loremflickr"
@@ -160,9 +185,11 @@ def baixar_imagem(cena, pasta, idx, modo, estilo="cinematic"):
     criar_gradiente(destino)
     return "gradiente"
 
+
 async def gerar_audio(texto, voz, rate, pitch, volume, destino):
     comunicador = edge_tts.Communicate(texto, voz, rate=rate, pitch=pitch, volume=volume)
     await comunicador.save(str(destino))
+
 
 def duracao_audio(arquivo):
     out = subprocess.run(
@@ -175,12 +202,34 @@ def duracao_audio(arquivo):
     except Exception:
         return 10.0
 
+
 def escapar_drawtext(t):
-    t = t.replace('"', " ").replace(":", " ").replace("'", " ").replace("%", " ").replace("\n", " ").replace(",", " ")
-    return t.strip()[:80]
+    t = t.replace('"', " ").replace(":", " ").replace("'", " ").replace("%", " ")
+    return t.strip()[:120]
+
+
+def quebrar_linhas(texto, max_chars=35, max_linhas=3):
+    """Quebra o texto em até max_linhas linhas de no máximo max_chars caracteres,
+    retornando com quebra de linha escapada para o filtro drawtext do ffmpeg."""
+    palavras = texto.split()
+    linhas, atual = [], []
+    for p in palavras:
+        if sum(len(w) for w in atual) + len(atual) + len(p) <= max_chars:
+            atual.append(p)
+        else:
+            if atual:
+                linhas.append(" ".join(atual))
+            atual = [p]
+            if len(linhas) >= max_linhas:
+                break
+    if atual and len(linhas) < max_linhas:
+        linhas.append(" ".join(atual))
+    return "\\n".join(linhas[:max_linhas])
+
 
 def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
-    texto = escapar_drawtext(legenda)
+    texto_bruto = escapar_drawtext(legenda)
+    texto = quebrar_linhas(texto_bruto, max_chars=35, max_linhas=3)
     rotulo = escapar_drawtext(f"Cena {idx} de {total}")
     vf = (
         f"scale=1920:1080,"
@@ -188,7 +237,7 @@ def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
         f"d={frames}:s=1280x720:fps=30,"
         f"drawtext=fontfile={FONTE}:text='VozIA':fontcolor=white@0.9:fontsize=30:x=40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2,"
         f"drawtext=fontfile={FONTE}:text='{rotulo}':fontcolor=white@0.7:fontsize=26:x=w-text_w-40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2,"
-        f"drawtext=fontfile={FONTE}:text='{texto}':fontcolor=white:fontsize=44:x=(w-text_w)/2:y=h-170:box=1:boxcolor=black@0.45:boxborderw=22:shadowcolor=black@0.8:shadowx=2:shadowy=2"
+        f"drawtext=fontfile={FONTE}:text='{texto}':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=h-160:line_spacing=8:box=1:boxcolor=black@0.45:boxborderw=14:shadowcolor=black@0.8:shadowx=2:shadowy=2"
     )
     subprocess.run(
         [FFMPEG, "-y", "-loop", "1", "-i", str(img), "-vf", vf,
@@ -196,6 +245,7 @@ def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
          "-c:v", "libx264", "-pix_fmt", "yuv420p", str(pasta / outname)],
         capture_output=True,
     )
+
 
 def gerar_video_job(job_id, dados):
     final = JOBS_DIR / f"{job_id}.mp4"
@@ -264,6 +314,7 @@ def gerar_video_job(job_id, dados):
     except Exception as exc:
         JOBS[job_id] = {"status": "error", "error": str(exc)}
 
+
 @app.route("/api/video", methods=["POST"])
 def api_video():
     dados = request.get_json(force=True, silent=True) or {}
@@ -276,6 +327,7 @@ def api_video():
     threading.Thread(target=gerar_video_job, args=(job_id, dados), daemon=True).start()
     return jsonify({"jobId": job_id}), 202
 
+
 @app.get("/api/video/status/<job_id>")
 def video_status(job_id):
     job = JOBS.get(job_id)
@@ -287,6 +339,7 @@ def video_status(job_id):
         return jsonify({"status": "done", "downloadUrl": f"/api/video/download/{job_id}"})
     return jsonify({"status": "error", "erro": job.get("error", "Erro desconhecido")}), 500
 
+
 @app.get("/api/video/download/<job_id>")
 def video_download(job_id):
     job = JOBS.get(job_id)
@@ -294,6 +347,7 @@ def video_download(job_id):
         return jsonify({"erro": "Vídeo não disponível"}), 404
     return send_file(job["file"], mimetype="video/mp4", as_attachment=True,
                      download_name="vozia_video.mp4")
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=False)
