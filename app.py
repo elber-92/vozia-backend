@@ -208,9 +208,9 @@ def escapar_drawtext(t):
     return t.strip()[:120]
 
 
-def quebrar_linhas(texto, max_chars=35, max_linhas=3):
+def quebrar_linhas(texto, max_chars=28, max_linhas=3):
     """Quebra o texto em até max_linhas linhas de no máximo max_chars caracteres,
-    retornando com quebra de linha escapada para o filtro drawtext do ffmpeg."""
+    retornando com quebras de linha reais."""
     palavras = texto.split()
     linhas, atual = [], []
     for p in palavras:
@@ -224,20 +224,25 @@ def quebrar_linhas(texto, max_chars=35, max_linhas=3):
                 break
     if atual and len(linhas) < max_linhas:
         linhas.append(" ".join(atual))
-    return "\\n".join(linhas[:max_linhas])
+    return "\n".join(linhas[:max_linhas])
 
 
 def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
     texto_bruto = escapar_drawtext(legenda)
-    texto = quebrar_linhas(texto_bruto, max_chars=35, max_linhas=3)
+    texto = quebrar_linhas(texto_bruto, max_chars=28, max_linhas=3)
     rotulo = escapar_drawtext(f"Cena {idx} de {total}")
+
+    # Escrever o texto em arquivo para evitar problemas de escape no ffmpeg
+    texto_file = pasta / f"legenda_{idx:03d}.txt"
+    texto_file.write_text(texto, encoding="utf-8")
+
     vf = (
         f"scale=1920:1080,"
         f"zoompan=z='min(1.0+0.00015*on,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
         f"d={frames}:s=1280x720:fps=30,"
         f"drawtext=fontfile={FONTE}:text='VozIA':fontcolor=white@0.9:fontsize=30:x=40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2,"
         f"drawtext=fontfile={FONTE}:text='{rotulo}':fontcolor=white@0.7:fontsize=26:x=w-text_w-40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2,"
-        f"drawtext=fontfile={FONTE}:text='{texto}':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=h-160:line_spacing=8:box=1:boxcolor=black@0.45:boxborderw=14:shadowcolor=black@0.8:shadowx=2:shadowy=2"
+        f"drawtext=fontfile={FONTE}:textfile={texto_file}:fontcolor=white:fontsize=28:x=(w-text_w)/2:y=h-150:line_spacing=6:box=1:boxcolor=black@0.45:boxborderw=8:shadowcolor=black@0.8:shadowx=2:shadowy=2"
     )
     subprocess.run(
         [FFMPEG, "-y", "-loop", "1", "-i", str(img), "-vf", vf,
