@@ -126,14 +126,20 @@ def criar_gradiente(destino):
         capture_output=True,
     )
 
-def baixar_imagem(cena, pasta, idx, modo):
+ESTILOS_IMAGEM = {
+    "cinematic": "cinematic film still, dramatic lighting, unified color palette, high detail",
+    "realistic": "photorealistic, natural lighting, realistic textures, high detail",
+    "illustration": "digital illustration, vibrant colors, clean composition, high detail",
+    "anime": "anime style, cel shading, vibrant colors, clean lines, high detail",
+    "fantasy": "epic fantasy art, magical atmosphere, rich colors, volumetric light, high detail",
+}
+
+def baixar_imagem(cena, pasta, idx, modo, estilo="cinematic"):
     tag = detectar_tag(cena)
     destino = pasta / f"cena_{idx:03d}.jpg"
+    sufixo = ESTILOS_IMAGEM.get(estilo, ESTILOS_IMAGEM["cinematic"])
     if modo in ("qualidade", "automatico"):
-        prompt = (
-            cena[:120] + ", cinematic illustration, high quality, "
-            "no text, no watermark, 16:9 widescreen"
-        )
+        prompt = (cena[:120] + ", " + sufixo + ", no text, no watermark, 16:9 widescreen")
         url = (
             "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) +
             "?width=1280&height=720&nologo=true&seed=" + str(1000 + idx) + "&model=flux"
@@ -196,6 +202,7 @@ def api_video():
     pitch = dados.get("pitch", "+0Hz")
     volume = dados.get("volume", "+0%")
     modo = dados.get("mode", "rapido")
+    estilo = dados.get("style", "cinematic")
 
     with tempfile.TemporaryDirectory() as tmp:
         pasta = Path(tmp)
@@ -206,7 +213,7 @@ def api_video():
 
         origens = []
         for i, cena in enumerate(cenas, 1):
-            origem = baixar_imagem(cena, pasta, i, modo)
+            origem = baixar_imagem(cena, pasta, i, modo, estilo)
             origens.append({"cena": cena[:60], "origem": origem})
 
         audio = pasta / "narracao.mp3"
