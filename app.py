@@ -151,7 +151,6 @@ ESTILOS_IMAGEM = {
 
 
 def extrair_assunto(cena, tag):
-    """Extrai um assunto visual relevante da cena para o prompt de imagem."""
     cena_limpa = cena.replace('"', "").replace("'", "").strip()
     palavras = cena_limpa.split()
     if len(palavras) <= 6:
@@ -209,8 +208,6 @@ def escapar_drawtext(t):
 
 
 def quebrar_linhas(texto, max_chars=28, max_linhas=3):
-    """Quebra o texto em até max_linhas linhas de no máximo max_chars caracteres,
-    retornando com quebras de linha reais."""
     palavras = texto.split()
     linhas, atual = [], []
     for p in palavras:
@@ -227,23 +224,46 @@ def quebrar_linhas(texto, max_chars=28, max_linhas=3):
     return "\n".join(linhas[:max_linhas])
 
 
-def renderizar_cena(img, legenda, idx, total, frames, pasta, outname):
-    texto_bruto = escapar_drawtext(legenda)
-    texto = quebrar_linhas(texto_bruto, max_chars=28, max_linhas=3)
+def renderizar_cena(img, legenda, idx, total, frames, pasta, outname,
+                    legenda_mostrar=True, legenda_posicao="inferior",
+                    legenda_tamanho=28):
     rotulo = escapar_drawtext(f"Cena {idx} de {total}")
 
-    # Escrever o texto em arquivo para evitar problemas de escape no ffmpeg
-    texto_file = pasta / f"legenda_{idx:03d}.txt"
-    texto_file.write_text(texto, encoding="utf-8")
+    # Filtros fixos (marca d'água e contador de cena)
+    filtros = [
+        "scale=1920:1080",
+        ("zoompan=z='min(1.0+0.00015*on,1.08)':x='iw/2-(iw/zoom/2)':"
+         "y='ih/2-(ih/zoom/2)':d={}:s=1280x720:fps=30".format(frames)),
+        ("drawtext=fontfile={}:text='VozIA':fontcolor=white@0.9:fontsize=30:"
+         "x=40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2".format(FONTE)),
+        ("drawtext=fontfile={}:text='{}':fontcolor=white@0.7:fontsize=26:"
+         "x=w-text_w-40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2".format(FONTE, rotulo)),
+    ]
 
-    vf = (
-        f"scale=1920:1080,"
-        f"zoompan=z='min(1.0+0.00015*on,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-        f"d={frames}:s=1280x720:fps=30,"
-        f"drawtext=fontfile={FONTE}:text='VozIA':fontcolor=white@0.9:fontsize=30:x=40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2,"
-        f"drawtext=fontfile={FONTE}:text='{rotulo}':fontcolor=white@0.7:fontsize=26:x=w-text_w-40:y=40:shadowcolor=black@0.8:shadowx=2:shadowy=2,"
-        f"drawtext=fontfile={FONTE}:textfile={texto_file}:fontcolor=white:fontsize=28:x=(w-text_w)/2:y=h-150:line_spacing=6:box=1:boxcolor=black@0.45:boxborderw=8:shadowcolor=black@0.8:shadowx=2:shadowy=2"
-    )
+    # Filtro da legenda (opcional e reenquadrável)
+    if legenda_mostrar:
+        texto_legenda = escapar_drawtext(legenda)
+        texto_legenda = quebrar_linhas(texto_legenda, max_chars=28, max_linhas=3)
+        legenda_file = pasta / f"legenda_{idx:03d}.txt"
+        legenda_file.write_text(texto_legenda, encoding="utf-8")
+
+        if legenda_posicao == "centro":
+            pos_y = "(h-text_h)/2"
+        elif legenda_posicao == "superior":
+            pos_y = "90"
+        else:
+            pos_y = "h-text_h-40"
+
+        boxborder = max(8, int(legenda_tamanho * 0.35))
+        filtros.append(
+            "drawtext=fontfile={}:textfile={}:fontcolor=white:fontsize={}:"
+            "x=(w-text_w)/2:y={}:line_spacing=6:box=1:boxcolor=black@0.45:"
+            "boxborderw={}:shadowcolor=black@0.8:shadowx=2:shadowy=2".format(
+                FONTE, legenda_file, legenda_tamanho, pos_y, boxborder
+            )
+        )
+
+    vf = ",".join(filtros)
     subprocess.run(
         [FFMPEG, "-y", "-loop", "1", "-i", str(img), "-vf", vf,
          "-t", str(frames / 30.0), "-r", "30", "-preset", "ultrafast",
@@ -266,12 +286,31 @@ def gerar_video_job(job_id, dados):
         modo = dados.get("mode", "rapido")
         estilo = dados.get("style", "cinematic")
 
+        # Configurações de legenda
+        legenda_mostrar = dados.get("legenda_mostrar", True)
+        if not isinstance(legenda_mostrar, bool):
+            legenda_mostrar = str(legenda_mostrar).lower() in ("1", "true", "sim", "yes", "on")
+        legenda_posicao = str(dados.get("legenda_posicao", "inferior")).lower()
+        if legenda_posicao not in ("inferior", "centro", "superior"):
+            legenda_posicao = "inferior"
+        try:
+            legenda_tamanho = int(dados.get("legenda_tamanho", 28))
+        except (TypeError, ValueError):
+            legenda_tamanho = 28
+        legenda_tamanho = max(20, min(40, legenda_tamanho))
+        legendas = dados.get("legendas")
+        if not isinstance(legendas, list):
+            legendas = None
+
         with tempfile.TemporaryDirectory() as tmp:
             pasta = Path(tmp)
 
             cenas = dividir_em_cenas(texto)
             if len(cenas) > 40:
                 raise ValueError("Muitas cenas (máximo 40). Divida o texto em partes.")
+
+            # Valida o array de legendas customizadas contra o número de cenas
+            legendas_usar = legendas if (legendas and len(legendas) == len(cenas)) else None
 
             for i, cena in enumerate(cenas, 1):
                 baixar_imagem(cena, pasta, i, modo, estilo)
@@ -285,14 +324,20 @@ def gerar_video_job(job_id, dados):
             frames_por_cena = [max(30, int(dur * 30 * (t / soma))) for t in totais]
 
             for i, cena in enumerate(cenas):
+                legenda_cena = cena
+                if legendas_usar:
+                    legenda_cena = (legendas_usar[i - 1] or "").strip() or cena
                 renderizar_cena(
                     pasta / f"cena_{i+1:03d}.jpg",
-                    cena,
+                    legenda_cena,
                     i + 1,
                     len(cenas),
                     frames_por_cena[i],
                     pasta,
                     f"clip_{i:03d}.mp4",
+                    legenda_mostrar=legenda_mostrar,
+                    legenda_posicao=legenda_posicao,
+                    legenda_tamanho=legenda_tamanho,
                 )
 
             lista = pasta / "lista.txt"
